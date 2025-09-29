@@ -1,4 +1,4 @@
-package logger
+package s_log
 
 import (
 	"log/slog"
