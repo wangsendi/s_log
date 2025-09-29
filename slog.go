@@ -7,8 +7,6 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-/* ========= 配置 ========= */
-
 type HandlerType int
 
 const (
@@ -23,7 +21,7 @@ type config struct {
 	handler   HandlerType
 	addSource bool
 	logFile   string
-	color     bool // 仅 Text 有效
+	color     bool
 }
 
 func defaults() *config {
@@ -54,11 +52,9 @@ const (
 
 func colorize(s, c string) string { return c + s + reset }
 
-// Go 1.25：ReplaceAttr 必须是 func([]string, slog.Attr) slog.Attr
 func colorReplaceAttr(_ []string, a slog.Attr) slog.Attr {
 	switch a.Key {
 	case slog.LevelKey:
-		// a.Value.Any() -> any，再断言为 slog.Level
 		if lv, ok := a.Value.Any().(slog.Level); ok {
 			switch {
 			case lv <= slog.LevelDebug:
@@ -67,7 +63,7 @@ func colorReplaceAttr(_ []string, a slog.Attr) slog.Attr {
 				return slog.String(a.Key, colorize(lv.String(), fgGreen))
 			case lv == slog.LevelWarn:
 				return slog.String(a.Key, colorize(lv.String(), fgYellow))
-			default: // error+
+			default:
 				return slog.String(a.Key, colorize(lv.String(), fgRed))
 			}
 		}
@@ -76,8 +72,6 @@ func colorReplaceAttr(_ []string, a slog.Attr) slog.Attr {
 	}
 	return a
 }
-
-/* ========= Core ========= */
 
 var levelVar slog.LevelVar
 
@@ -94,7 +88,6 @@ func newRotateWriter(path string) *lumberjack.Logger {
 	}
 }
 
-// New：构建并设为默认
 func New(opts ...Option) *slog.Logger {
 	cfg := defaults()
 	for _, opt := range opts {
@@ -113,7 +106,7 @@ func New(opts ...Option) *slog.Logger {
 	var h slog.Handler
 	if w := newRotateWriter(cfg.logFile); w != nil {
 		if cfg.handler == HandlerJSON {
-			h = slog.NewJSONHandler(w, hopts) // JSON 不加色
+			h = slog.NewJSONHandler(w, hopts)
 		} else {
 			h = slog.NewTextHandler(w, hopts)
 		}
@@ -130,5 +123,4 @@ func New(opts ...Option) *slog.Logger {
 	return l
 }
 
-// 运行时改级别
 func SetLevel(l slog.Level) { levelVar.Set(l) }
