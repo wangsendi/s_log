@@ -20,13 +20,17 @@ type formatter struct {
 	fn func(io.Writer, *slog.HandlerOptions) slog.Handler
 }
 
-func (f *formatter) Format(w io.Writer, opts *slog.HandlerOptions) slog.Handler { return f.fn(w, opts) }
+func (f *formatter) Format(w io.Writer, opts *slog.HandlerOptions) slog.Handler {
+	return f.fn(w, opts)
+}
 
 type colorTextHandler struct {
-	w      io.Writer
-	opts   *slog.HandlerOptions
-	level  *slog.LevelVar
-	groups []string
+	w         io.Writer
+	opts      *slog.HandlerOptions
+	level     *slog.LevelVar
+	groups    []string
+	workDir   string
+	workDirOK bool
 }
 
 func (h *colorTextHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -35,64 +39,60 @@ func (h *colorTextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h *colorTextHandler) Handle(ctx context.Context, r slog.Record) error {
 	buf := make([]byte, 0, 512)
-	buf = append(buf, "time="...)
-	buf = r.Time.AppendFormat(buf, "2006-01-02T15:04:05.000Z07:00")
-	buf = append(buf, " level="...)
-	c := levelColors[r.Level]
-	if c == "" {
-		if r.Level < slog.LevelInfo {
-			c = fgGray
-		} else {
-			c = fgRed
-		}
-	}
-	buf = append(append(append(buf, c...), r.Level.String()...), reset...)
-	if h.opts != nil && h.opts.AddSource && r.PC != 0 {
-		if f, _ := runtime.CallersFrames([]uintptr{r.PC}).Next(); f.File != "" {
-			file := f.File
-			if wd, err := os.Getwd(); err == nil {
-				if rel, err := filepath.Rel(wd, file); err == nil && len(rel) < len(file) {
-					file = rel
-				}
-			}
-			buf = append(buf, " source="...)
-			buf = append(buf, fgGray...)
-			buf = append(buf, '"')
-			buf = append(buf, file...)
-			buf = append(buf, ':')
-			buf = strconv.AppendInt(buf, int64(f.Line), 10)
-			buf = append(buf, '"')
-			buf = append(buf, reset...)
-		}
-	}
-	buf = append(buf, " msg="...)
-	buf = append(buf, fgCyan...)
-	buf = append(buf, r.Message...)
-	buf = append(buf, reset...)
+	buf = append(append(append(buf, "time="...), r.Time.AppendFormat(nil, timeFormat)...), ' ')
+	buf = append(append(append(append(append(buf, "level="...), bold...), getLevelColor(r.Level)...), r.Level.String()...), reset...)
+	buf = append(buf, ' ')
+	h.writeColored(&buf, fgCyan, r.Message)
 	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == slog.LevelKey || a.Key == slog.MessageKey || a.Key == slog.TimeKey || a.Key == slog.SourceKey {
-			return true
+		if !builtinKeys[a.Key] {
+			buf = append(buf, ' ')
+			h.writeColored(&buf, fgBlue, a.Key)
+			buf = append(buf, '=')
+			h.appendValue(&buf, a.Value, fgCyan)
 		}
-		buf = append(buf, ' ')
-		buf = append(buf, a.Key...)
-		buf = append(buf, '=')
-		h.appendValue(&buf, a.Value)
-		buf = append(buf, reset...)
 		return true
 	})
+	if h.opts != nil && h.opts.AddSource && r.PC != 0 {
+		if f, _ := runtime.CallersFrames([]uintptr{r.PC}).Next(); f.File != "" {
+			buf = append(buf, ' ')
+			h.writeColored(&buf, fgGray, "source=")
+			h.writeColored(&buf, fgGray, strconv.Quote(h.formatSourcePath(f.File)+":"+strconv.Itoa(f.Line)))
+		}
+	}
 	buf = append(buf, '\n')
 	_, err := h.w.Write(buf)
 	return err
 }
 
-func (h *colorTextHandler) appendValue(buf *[]byte, v slog.Value) {
-	switch v.Kind() {
-	case slog.KindString:
-		s := v.String()
-		if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
-			*buf = append(*buf, fgGray...)
+func (h *colorTextHandler) writeColored(buf *[]byte, color, text string) {
+	if color != "" {
+		*buf = append(append(append(*buf, color...), text...), reset...)
+	} else {
+		*buf = append(*buf, text...)
+	}
+}
+
+func (h *colorTextHandler) formatSourcePath(file string) string {
+	if !h.workDirOK {
+		if wd, err := os.Getwd(); err == nil {
+			h.workDir, h.workDirOK = wd, true
 		}
-		*buf = append(*buf, s...)
+	}
+	if h.workDirOK {
+		if rel, err := filepath.Rel(h.workDir, file); err == nil && len(rel) < len(file) {
+			return rel
+		}
+	}
+	return file
+}
+
+func (h *colorTextHandler) appendValue(buf *[]byte, v slog.Value, color string) {
+	if color != "" {
+		*buf = append(*buf, color...)
+	}
+	switch v = v.Resolve(); v.Kind() {
+	case slog.KindString:
+		*buf = append(*buf, v.String()...)
 	case slog.KindInt64:
 		*buf = strconv.AppendInt(*buf, v.Int64(), 10)
 	case slog.KindUint64:
@@ -106,26 +106,26 @@ func (h *colorTextHandler) appendValue(buf *[]byte, v slog.Value) {
 	case slog.KindTime:
 		*buf = v.Time().AppendFormat(*buf, time.RFC3339Nano)
 	case slog.KindAny:
-		s := fmt.Sprint(v.Any())
-		if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
-			*buf = append(*buf, fgGray...)
-		}
-		*buf = append(*buf, s...)
+		*buf = append(*buf, fmt.Sprint(v.Any())...)
 	case slog.KindLogValuer:
-		h.appendValue(buf, v.LogValuer().LogValue())
+		h.appendValue(buf, v.LogValuer().LogValue(), color)
 	case slog.KindGroup:
 		for _, a := range v.Group() {
-			*buf = append(*buf, ' ')
-			*buf = append(*buf, a.Key...)
-			*buf = append(*buf, '=')
-			h.appendValue(buf, a.Value)
+			*buf = append(append(append(*buf, ' '), a.Key...), '=')
+			h.appendValue(buf, a.Value, color)
 		}
+	}
+	if color != "" {
+		*buf = append(*buf, reset...)
 	}
 }
 
-func (h *colorTextHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+func (h *colorTextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return h
+}
+
 func (h *colorTextHandler) WithGroup(name string) slog.Handler {
-	return &colorTextHandler{h.w, h.opts, h.level, append(h.groups, name)}
+	return &colorTextHandler{w: h.w, opts: h.opts, level: h.level, groups: append(h.groups, name), workDir: h.workDir, workDirOK: h.workDirOK}
 }
 
 type colorFormatter struct{}
@@ -135,7 +135,8 @@ func (f *colorFormatter) Format(w io.Writer, opts *slog.HandlerOptions) slog.Han
 	if opts != nil && opts.Level != nil {
 		lv, _ = opts.Level.(*slog.LevelVar)
 	}
-	return &colorTextHandler{w, opts, lv, nil}
+	wd, err := os.Getwd()
+	return &colorTextHandler{w: w, opts: opts, level: lv, workDir: wd, workDirOK: err == nil}
 }
 
 type colorJSONFormatter struct {
@@ -154,15 +155,8 @@ func (f *colorJSONFormatter) Format(w io.Writer, opts *slog.HandlerOptions) slog
 		switch a.Key {
 		case slog.LevelKey:
 			if lv, ok := a.Value.Any().(slog.Level); ok {
-				c := levelColors[lv]
-				if c == "" {
-					if lv < slog.LevelInfo {
-						c = fgGray
-					} else {
-						c = fgRed
-					}
-				}
-				return slog.String(a.Key, c+lv.String()+reset)
+				color := getLevelColor(lv)
+				return slog.String(a.Key, bold+color+lv.String()+reset)
 			}
 		case slog.MessageKey:
 			return slog.String(a.Key, fgCyan+a.Value.String()+reset)
@@ -185,17 +179,38 @@ func ColorText() Formatter { return colorTextFmt }
 func ColorJSON() Formatter { return colorJSONFmt }
 
 const (
-	reset    = "\x1b[0m"
-	fgRed    = "\x1b[31m"
-	fgGreen  = "\x1b[32m"
-	fgYellow = "\x1b[33m"
-	fgCyan   = "\x1b[36m"
-	fgGray   = "\x1b[90m"
+	reset      = "\x1b[0m"
+	bold       = "\x1b[1m"
+	fgRed      = "\x1b[31m"
+	fgGreen    = "\x1b[32m"
+	fgYellow   = "\x1b[33m"
+	fgBlue     = "\x1b[34m"
+	fgCyan     = "\x1b[36m"
+	fgGray     = "\x1b[90m"
+	timeFormat = "2006-01-02T15:04:05.000Z07:00"
 )
 
-var levelColors = map[slog.Level]string{
-	slog.LevelDebug: fgGray,
-	slog.LevelInfo:  fgGreen,
-	slog.LevelWarn:  fgYellow,
-	slog.LevelError: fgRed,
+var (
+	levelColors = map[slog.Level]string{
+		slog.LevelDebug: fgGray,
+		slog.LevelInfo:  fgGreen,
+		slog.LevelWarn:  fgYellow,
+		slog.LevelError: fgRed,
+	}
+	builtinKeys = map[string]bool{
+		slog.LevelKey:   true,
+		slog.MessageKey: true,
+		slog.TimeKey:    true,
+		slog.SourceKey:  true,
+	}
+)
+
+func getLevelColor(level slog.Level) string {
+	if c, ok := levelColors[level]; ok {
+		return c
+	}
+	if level < slog.LevelInfo {
+		return fgGray
+	}
+	return fgRed
 }
