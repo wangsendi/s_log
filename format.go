@@ -77,6 +77,7 @@ func (h *colorTextHandler) Handle(ctx context.Context, r slog.Record) error {
 		buf = append(buf, a.Key...)
 		buf = append(buf, '=')
 		h.appendValue(&buf, a.Value)
+		buf = append(buf, reset...)
 		return true
 	})
 	buf = append(buf, '\n')
@@ -87,7 +88,11 @@ func (h *colorTextHandler) Handle(ctx context.Context, r slog.Record) error {
 func (h *colorTextHandler) appendValue(buf *[]byte, v slog.Value) {
 	switch v.Kind() {
 	case slog.KindString:
-		*buf = append(*buf, v.String()...)
+		s := v.String()
+		if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
+			*buf = append(*buf, fgGray...)
+		}
+		*buf = append(*buf, s...)
 	case slog.KindInt64:
 		*buf = strconv.AppendInt(*buf, v.Int64(), 10)
 	case slog.KindUint64:
@@ -101,7 +106,11 @@ func (h *colorTextHandler) appendValue(buf *[]byte, v slog.Value) {
 	case slog.KindTime:
 		*buf = v.Time().AppendFormat(*buf, time.RFC3339Nano)
 	case slog.KindAny:
-		*buf = append(*buf, fmt.Sprint(v.Any())...)
+		s := fmt.Sprint(v.Any())
+		if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
+			*buf = append(*buf, fgGray...)
+		}
+		*buf = append(*buf, s...)
 	case slog.KindLogValuer:
 		h.appendValue(buf, v.LogValuer().LogValue())
 	case slog.KindGroup:
